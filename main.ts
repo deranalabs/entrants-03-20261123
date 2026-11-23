@@ -2,26 +2,42 @@
 // Hands in the owner's make.fun bounties: checks BOUNTY.json, then copies it to the output folder.
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import assert from "node:assert/strict";
 
 const MAX_FILE_BYTES = 16384;
 const MAX_ITEMS = 100;
 const MAX_ITEM_CHARS = 2048;
-const SLUG = /^[a-z0-9-]+$/;
-const ADDRESS = /^https:\/\/make\.fun\/(bounty|c)\/([a-z0-9-]+)$/;
+// A slug is lower case letters, digits and hyphens; a lowercase uuid fits the same shape.
+const SLUG = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const PATH = /^\/(bounty|c)\/([^/]+)\/?$/;
+
+class Rejected extends Error {}
 
 function fail(message: string): never {
-  console.error(`BOUNTY.json rejected: ${message}`);
-  process.exit(1);
+  throw new Rejected(message);
 }
 
+// Reads one item as the slug it names, the way the gate does.
 function keyOf(item: string): string {
-  const match = ADDRESS.exec(item);
-  if (match) return match[2];
   if (SLUG.test(item)) return item;
-  fail(`"${item}" is not a make.fun bounty address, slug or id`);
+  let url: URL;
+  try {
+    url = new URL(item);
+  } catch {
+    fail(`"${item}" is not a make.fun bounty address, slug or id`);
+  }
+  const host = url.hostname;
+  const onSite = host === "make.fun" || host.endsWith(".make.fun");
+  if (!onSite || (url.protocol !== "https:" && url.protocol !== "http:")) {
+    fail(`"${item}" is not an address on make.fun`);
+  }
+  const match = PATH.exec(url.pathname);
+  if (!match || !SLUG.test(match[2])) fail(`"${item}" is not /bounty/<slug> or /c/<slug>`);
+  return match[2];
 }
 
-function check(raw: Buffer): void {
+// Returns the slugs the file names, in order, or throws Rejected.
+function check(raw: Buffer): string[] {
   if (raw.length > MAX_FILE_BYTES) fail(`file is ${raw.length} bytes, limit ${MAX_FILE_BYTES}`);
   let data: unknown;
   try {
@@ -46,12 +62,55 @@ function check(raw: Buffer): void {
     if (seen.has(key)) fail(`"${key}" is named twice`);
     seen.add(key);
   }
+  return [...seen];
 }
 
-const botDir = process.env.MAKEFUN_BOT_DIR || "/bot";
-const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
-const raw = readFileSync(join(botDir, "BOUNTY.json"));
-check(raw);
-mkdirSync(outDir, { recursive: true });
-writeFileSync(join(outDir, "BOUNTY.json"), raw);
-console.log(`BOUNTY.json copied to ${outDir}`);
+function selftest(): void {
+  const ok = (text: string) => check(Buffer.from(text));
+  const bad = (text: string) => assert.throws(() => ok(text), Rejected, text);
+  const love = "u-deranalabs-make-the-judge-fall-in-love-in-one-line-8e712c13";
+  assert.deepEqual(ok(`{"bounties": ["https://make.fun/bounty/${love}"]}`), [love]);
+  assert.deepEqual(ok(`{"url": "http://www.make.fun/c/${love}/?ref=x#top"}`), [love]);
+  assert.deepEqual(ok('{"bounties": ["0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b"]}'), ["0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b"]);
+  bad("not json");
+  bad('["a"]');
+  bad('{"bounties": [], "url": "a"}');
+  bad("{}");
+  bad('{"bounties": []}');
+  bad(`{"bounties": ${JSON.stringify(Array.from({ length: 101 }, (_, i) => `b${i}`))}}`);
+  bad(`{"bounties": ["${"a".repeat(2049)}"]}`);
+  bad('{"bounties": ["https://make.fun/bounty/a", "a"]}');
+  bad('{"bounties": ["https://evil.example/bounty/a"]}');
+  bad('{"bounties": ["https://make.fun/bounty/Upper"]}');
+  bad('{"bounties": [7]}');
+  bad(`{"bounties": ["a"], "pad": "${"x".repeat(MAX_FILE_BYTES)}"}`);
+  // The real file must pass and name both bounties.
+  const real = readFileSync(new URL("./BOUNTY.json", import.meta.url));
+  assert.equal(check(real).length, 2);
+  console.log("selftest passed");
+}
+
+function run(): void {
+  const botDir = process.env.MAKEFUN_BOT_DIR || "/bot";
+  const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
+  const source = join(botDir, "BOUNTY.json");
+  let raw: Buffer;
+  try {
+    raw = readFileSync(source);
+  } catch {
+    fail(`cannot read ${source}`);
+  }
+  const slugs = check(raw);
+  mkdirSync(outDir, { recursive: true });
+  writeFileSync(join(outDir, "BOUNTY.json"), raw);
+  console.log(`BOUNTY.json (${slugs.length} bounties) copied to ${outDir}`);
+}
+
+try {
+  if (process.argv.includes("--selftest")) selftest();
+  else run();
+} catch (error) {
+  if (!(error instanceof Rejected)) throw error;
+  console.error(`BOUNTY.json rejected: ${error.message}`);
+  process.exit(1);
+}
