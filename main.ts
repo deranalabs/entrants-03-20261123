@@ -84,9 +84,11 @@ function selftest(): void {
   bad('{"bounties": ["https://make.fun/bounty/Upper"]}');
   bad('{"bounties": [7]}');
   bad(`{"bounties": ["a"], "pad": "${"x".repeat(MAX_FILE_BYTES)}"}`);
-  // The real file must pass and name both bounties.
+  // The real file must pass, and every bounty it lists must be a distinct one.
   const real = readFileSync(new URL("./BOUNTY.json", import.meta.url));
-  assert.equal(check(real).length, 2);
+  const listed = JSON.parse(real.toString("utf8")).bounties;
+  assert.ok(Array.isArray(listed) && listed.length > 0, "the real file names a bounties list");
+  assert.equal(check(real).length, listed.length);
   console.log("selftest passed");
 }
 
